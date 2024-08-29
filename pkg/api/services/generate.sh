@@ -46,3 +46,13 @@ protoc --go_out=task --go_opt=paths=source_relative \
     --go-grpc_opt=Mtask.proto=github.com/cedana/cedana/pkg/api/services/task \
     -I$PROTO_DIR \
     $PROTO_DIR/task.proto
+
+protoc --go_out=agent_task --go_opt=paths=source_relative \
+    --go-grpc_out=agent_task --go-grpc_opt=paths=source_relative \
+    --go_opt=Mgpu.proto=github.com/cedana/cedana/pkg/api/services/gpu \
+    --go_opt=Magent_task.proto=github.com/cedana/cedana/pkg/api/services/agent-task \
+    --go-grpc_opt=Mgpu.proto=github.com/cedana/cedana/pkg/api/services/gpu \
+    --go-grpc_opt=Magent_task.proto=github.com/cedana/cedana/pkg/api/services/agent-task \
+    -I$PROTO_DIR \
+    $PROTO_DIR/agent-task.proto
+

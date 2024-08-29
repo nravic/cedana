@@ -44,7 +44,7 @@ const (
 	SERVER_LOG_MODE         = os.O_APPEND | os.O_CREATE | os.O_WRONLY
 	SERVER_LOG_PERMS        = 0o644
 	GPU_CONTROLLER_LOG_PATH = "/tmp/cedana-gpucontroller.log"
-	VSOCK_PORT = 9999
+	VSOCK_PORT              = 9999
 )
 
 type service struct {
@@ -68,8 +68,8 @@ type Server struct {
 }
 
 type ServeOpts struct {
-	GPUEnabled  bool
-	CUDAVersion string
+	GPUEnabled   bool
+	CUDAVersion  string
 	VSOCKEnabled bool
 }
 
@@ -133,6 +133,10 @@ func (s *Server) start() error {
 func (s *Server) stop() error {
 	s.grpcServer.GracefulStop()
 	return s.listener.Close()
+}
+
+func StartAgentServer() error {
+
 }
 
 // Takes in a context that allows for cancellation from the cmdline
