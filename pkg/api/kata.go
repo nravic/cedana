@@ -5,11 +5,11 @@ package api
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
-	"strings"
 	"strconv"
-	"errors"
+	"strings"
 
 	"github.com/cedana/cedana/pkg/api/services/task"
 	"google.golang.org/grpc/codes"
@@ -22,7 +22,7 @@ import (
 // 	KATA_OUTPUT_FILE_FLAGS int         = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
 // )
 
-func (s *service) KataDump(ctx context.Context, args *task.DumpArgs) (*task.DumpResp, error) {
+func (s *agentService) KataDump(ctx context.Context, args *task.DumpArgs) (*task.DumpResp, error) {
 	var err error
 
 	state := &task.ProcessState{}

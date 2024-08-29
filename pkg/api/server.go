@@ -17,8 +17,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mdlayher/vsock"
-
 	"github.com/cedana/cedana/pkg/api/runc"
 	"github.com/cedana/cedana/pkg/api/services/gpu"
 	task "github.com/cedana/cedana/pkg/api/services/task"
@@ -61,10 +59,15 @@ type service struct {
 	task.UnimplementedTaskServiceServer
 }
 
-type Server struct {
+type DaemonServer struct {
 	grpcServer *grpc.Server
 	service    *service
 	listener   net.Listener
+}
+
+type Server interface {
+	start() error
+	stop() error
 }
 
 type ServeOpts struct {
@@ -77,11 +80,11 @@ type pullGPUBinaryRequest struct {
 	CudaVersion string `json:"cuda_version"`
 }
 
-func NewServer(ctx context.Context, opts *ServeOpts) (*Server, error) {
+func NewServer(ctx context.Context, opts *ServeOpts) (*DaemonServer, error) {
 	logger := ctx.Value("logger").(*zerolog.Logger)
 	var err error
 
-	server := &Server{
+	server := &DaemonServer{
 		grpcServer: grpc.NewServer(
 			grpc.StreamInterceptor(loggingStreamInterceptor(logger)),
 			grpc.UnaryInterceptor(loggingUnaryInterceptor(logger)),
@@ -110,15 +113,11 @@ func NewServer(ctx context.Context, opts *ServeOpts) (*Server, error) {
 
 	var listener net.Listener
 
-	if opts.VSOCKEnabled {
-		listener, err = vsock.Listen(VSOCK_PORT, nil)
-	} else {
-		listener, err = net.Listen(PROTOCOL, ADDRESS)
-	}
-
+	listener, err = net.Listen(PROTOCOL, ADDRESS)
 	if err != nil {
 		return nil, err
 	}
+
 	server.listener = listener
 	server.service = service
 
@@ -126,35 +125,25 @@ func NewServer(ctx context.Context, opts *ServeOpts) (*Server, error) {
 	return server, err
 }
 
-func (s *Server) start() error {
+func (s *DaemonServer) start() error {
 	return s.grpcServer.Serve(s.listener)
 }
 
-func (s *Server) stop() error {
+func (s *DaemonServer) stop() error {
 	s.grpcServer.GracefulStop()
 	return s.listener.Close()
 }
 
-func StartAgentServer() error {
-
-}
-
 // Takes in a context that allows for cancellation from the cmdline
-func StartServer(cmdCtx context.Context, opts *ServeOpts) error {
+func StartServer(cmdCtx context.Context, opts *ServeOpts, srv Server) error {
 	logger := cmdCtx.Value("logger").(*zerolog.Logger)
 
 	// Create a child context for the server
 	srvCtx, cancel := context.WithCancelCause(cmdCtx)
 	defer cancel(nil)
 
-	server, err := NewServer(srvCtx, opts)
-	if err != nil {
-		return err
-	}
-
 	go func() {
-		// Here join netns
-		// TODO find pause bundle path
+		// Network namespace joining logic remains the same
 		if viper.GetBool("is_k8s") {
 			_, bundle, err := runc.GetContainerIdByName(CEDANA_CONTAINER_NAME, "", K8S_RUNC_ROOT)
 			if err != nil {
@@ -175,7 +164,6 @@ func StartServer(cmdCtx context.Context, opts *ServeOpts) error {
 			}
 			defer unix.Close(nsFd)
 
-			// Join the network namespace of the target process
 			err = unix.Setns(nsFd, unix.CLONE_NEWNET)
 			if err != nil {
 				cancel(fmt.Errorf("Error setting network namespace: %v", err))
@@ -184,7 +172,7 @@ func StartServer(cmdCtx context.Context, opts *ServeOpts) error {
 
 		if opts.GPUEnabled {
 			if viper.GetString("gpu_controller_path") == "" {
-				err = pullGPUBinary(cmdCtx, utils.GpuControllerBinaryName, utils.GpuControllerBinaryPath, opts.CUDAVersion)
+				err := pullGPUBinary(cmdCtx, utils.GpuControllerBinaryName, utils.GpuControllerBinaryPath, opts.CUDAVersion)
 				if err != nil {
 					logger.Error().Err(err).Msg("could not pull gpu controller")
 					cancel(err)
@@ -195,7 +183,7 @@ func StartServer(cmdCtx context.Context, opts *ServeOpts) error {
 			}
 
 			if viper.GetString("gpu_shared_lib_path") == "" {
-				err = pullGPUBinary(cmdCtx, utils.GpuSharedLibName, utils.GpuSharedLibPath, opts.CUDAVersion)
+				err := pullGPUBinary(cmdCtx, utils.GpuSharedLibName, utils.GpuSharedLibPath, opts.CUDAVersion)
 				if err != nil {
 					logger.Error().Err(err).Msg("could not pull gpu shared lib")
 					cancel(err)
@@ -208,19 +196,18 @@ func StartServer(cmdCtx context.Context, opts *ServeOpts) error {
 
 		logger.Info().Str("address", ADDRESS).Msgf("server listening")
 
-		err := server.start()
+		err := srv.start()
 		if err != nil {
 			cancel(err)
 		}
 	}()
 
 	<-srvCtx.Done()
-	err = srvCtx.Err()
+	err := srvCtx.Err()
 
 	// Wait for all background go routines to finish
-	server.service.wg.Wait()
+	srv.stop()
 
-	server.stop()
 	logger.Debug().Msg("stopped RPC server gracefully")
 
 	return err

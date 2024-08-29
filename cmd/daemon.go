@@ -63,7 +63,14 @@ var startDaemonCmd = &cobra.Command{
 
 		logger.Info().Msgf("starting daemon version %s", rootCmd.Version)
 
-		err = api.StartServer(ctx, &api.ServeOpts{GPUEnabled: gpuEnabled, CUDAVersion: cudaVersions[cudaVersion], VSOCKEnabled: vsockEnabledFlag})
+		srvOpts := &api.ServeOpts{GPUEnabled: gpuEnabled, CUDAVersion: cudaVersions[cudaVersion]}
+
+		server, err := api.NewServer(ctx, srvOpts)
+		if err != nil {
+			return err
+		}
+
+		err = api.StartServer(ctx, srvOpts, server)
 		if err != nil {
 			logger.Error().Err(err).Msgf("stopping daemon")
 			return err

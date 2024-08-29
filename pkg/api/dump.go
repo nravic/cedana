@@ -26,8 +26,9 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/mdlayher/vsock"
 	"io"
+
+	"github.com/mdlayher/vsock"
 )
 
 const (
@@ -330,7 +331,7 @@ func (s *service) dump(ctx context.Context, state *task.ProcessState, args *task
 	return nil
 }
 
-func (s *service) kataDump(ctx context.Context, state *task.ProcessState, args *task.DumpArgs) error {
+func (s *agentService) kataDump(ctx context.Context, state *task.ProcessState, args *task.DumpArgs) error {
 	opts := s.prepareDumpOpts()
 	dumpdir, err := s.prepareDump(ctx, state, args, opts)
 	if err != nil {
