@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cedana/cedana/pkg/api/services/agent_task"
 	"github.com/cedana/cedana/pkg/api/services/gpu"
 	"github.com/cedana/cedana/pkg/api/services/rpc"
 	"github.com/cedana/cedana/pkg/api/services/task"
@@ -331,7 +332,7 @@ func (s *service) dump(ctx context.Context, state *task.ProcessState, args *task
 	return nil
 }
 
-func (s *agentService) kataDump(ctx context.Context, state *task.ProcessState, args *task.DumpArgs) error {
+func (s *agentService) kataDump(ctx context.Context, state *agent_task.ProcessState, args *agent_task.DumpArgs) error {
 	opts := s.prepareDumpOpts()
 	dumpdir, err := s.prepareDump(ctx, state, args, opts)
 	if err != nil {

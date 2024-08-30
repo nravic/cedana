@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -100,7 +99,7 @@ func (s *agentService) prepareDumpOpts() *rpc.CriuOpts {
 // prepareDump =/= preDump.
 // prepareDump sets up the folders to dump into, and sets the criu options.
 // preDump on the other hand does any process cleanup right before the checkpoint.
-func (s *agentService) prepareDump(ctx context.Context, state *task.ProcessState, args *task.DumpArgs, opts *rpc.CriuOpts) (string, error) {
+func (s *agentService) prepareDump(ctx context.Context, state *agent_task.ProcessState, args *agent_task.DumpArgs, opts *rpc.CriuOpts) (string, error) {
 	stats, ok := ctx.Value("dumpStats").(*task.DumpStats)
 	if !ok {
 		return "", fmt.Errorf("could not get dump stats from context")
@@ -185,12 +184,12 @@ func (s *agentService) prepareDump(ctx context.Context, state *task.ProcessState
 }
 
 // TODO NR - customizable errors
-func (s *agentService) generateState(ctx context.Context, pid int32) (*task.ProcessState, error) {
+func (s *agentService) generateState(ctx context.Context, pid int32) (*agent_task.ProcessState, error) {
 	if pid == 0 {
 		return nil, fmt.Errorf("invalid PID %d", pid)
 	}
 
-	state := &task.ProcessState{}
+	state := &agent_task.ProcessState{}
 
 	p, err := process.NewProcessWithContext(ctx, pid)
 	if err != nil {
@@ -200,24 +199,24 @@ func (s *agentService) generateState(ctx context.Context, pid int32) (*task.Proc
 	state.PID = pid
 
 	// Search for JID, if found, use that state with existing fields
-	list, err := s.db.ListJobs(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("could not list jobs: %v", err)
-	}
-	for _, job := range list {
-		st := &task.ProcessState{}
-		err = json.Unmarshal(job.State, st)
-		if err != nil {
-			continue
-		}
-		if st.PID == pid {
-			state = st
-			break
-		}
-	}
+	// list, err := s.db.ListJobs(ctx)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("could not list jobs: %v", err)
+	// }
+	// for _, job := range list {
+	// 	st := &task.ProcessState{}
+	// 	err = json.Unmarshal(job.State, st)
+	// 	if err != nil {
+	// 		continue
+	// 	}
+	// 	if st.PID == pid {
+	// 		state = st
+	// 		break
+	// 	}
+	// }
 
-	var openFiles []*task.OpenFilesStat
-	var openConnections []*task.ConnectionStat
+	var openFiles []*agent_task.OpenFilesStat
+	var openConnections []*agent_task.ConnectionStat
 
 	// get process uids, gids, and groups
 	uids, err := p.UidsWithContext(ctx)
@@ -239,23 +238,23 @@ func (s *agentService) generateState(ctx context.Context, pid int32) (*task.Proc
 	of, err := p.OpenFiles()
 	for _, f := range of {
 		var mode string
-		var stream task.OpenFilesStat_StreamType
+		var stream agent_task.OpenFilesStat_StreamType
 		file, err := os.Stat(f.Path)
 		if err == nil {
 			mode = file.Mode().Perm().String()
 			switch f.Fd {
 			case 0:
-				stream = task.OpenFilesStat_STDIN
+				stream = agent_task.OpenFilesStat_STDIN
 			case 1:
-				stream = task.OpenFilesStat_STDOUT
+				stream = agent_task.OpenFilesStat_STDOUT
 			case 2:
-				stream = task.OpenFilesStat_STDERR
+				stream = agent_task.OpenFilesStat_STDERR
 			default:
-				stream = task.OpenFilesStat_NONE
+				stream = agent_task.OpenFilesStat_NONE
 			}
 		}
 
-		openFiles = append(openFiles, &task.OpenFilesStat{
+		openFiles = append(openFiles, &agent_task.OpenFilesStat{
 			Fd:     f.Fd,
 			Path:   f.Path,
 			Mode:   mode,
@@ -273,15 +272,15 @@ func (s *agentService) generateState(ctx context.Context, pid int32) (*task.Proc
 		return nil, nil
 	}
 	for _, conn := range conns {
-		Laddr := &task.Addr{
+		Laddr := &agent_task.Addr{
 			IP:   conn.Laddr.IP,
 			Port: conn.Laddr.Port,
 		}
-		Raddr := &task.Addr{
+		Raddr := &agent_task.Addr{
 			IP:   conn.Raddr.IP,
 			Port: conn.Raddr.Port,
 		}
-		openConnections = append(openConnections, &task.ConnectionStat{
+		openConnections = append(openConnections, &agent_task.ConnectionStat{
 			Fd:     conn.Fd,
 			Family: conn.Family,
 			Type:   conn.Type,
@@ -314,7 +313,7 @@ func (s *agentService) generateState(ctx context.Context, pid int32) (*task.Proc
 	// system information
 	cpuinfo, _ := cpu.Info()
 	vcpus, _ := cpu.Counts(true)
-	state.CPUInfo = &task.CPUInfo{
+	state.CPUInfo = &agent_task.CPUInfo{
 		Count:      int32(vcpus),
 		CPU:        cpuinfo[0].CPU,
 		VendorID:   cpuinfo[0].VendorID,
@@ -323,14 +322,14 @@ func (s *agentService) generateState(ctx context.Context, pid int32) (*task.Proc
 	}
 
 	mem, _ := mem.VirtualMemory()
-	state.MemoryInfo = &task.MemoryInfo{
+	state.MemoryInfo = &agent_task.MemoryInfo{
 		Total:     mem.Total,
 		Available: mem.Available,
 		Used:      mem.Used,
 	}
 
 	host, _ := host.Info()
-	state.HostInfo = &task.HostInfo{
+	state.HostInfo = &agent_task.HostInfo{
 		HostID:               host.HostID,
 		Hostname:             host.Hostname,
 		OS:                   host.OS,
@@ -342,7 +341,7 @@ func (s *agentService) generateState(ctx context.Context, pid int32) (*task.Proc
 	}
 
 	// ignore sending network for now, little complicated
-	state.ProcessInfo = &task.ProcessInfo{
+	state.ProcessInfo = &agent_task.ProcessInfo{
 		OpenFds:         openFiles,
 		WorkingDir:      cwd,
 		MemoryPercent:   memoryUsed,

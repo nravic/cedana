@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cedana/cedana/pkg/api/services/agent_task"
 	"github.com/cedana/cedana/pkg/api/services/task"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -22,10 +23,10 @@ import (
 // 	KATA_OUTPUT_FILE_FLAGS int         = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
 // )
 
-func (s *agentService) KataDump(ctx context.Context, args *task.DumpArgs) (*task.DumpResp, error) {
+func (s *agentService) KataDump(ctx context.Context, args *agent_task.DumpArgs) (*agent_task.DumpResp, error) {
 	var err error
 
-	state := &task.ProcessState{}
+	state := &agent_task.ProcessState{}
 	kataAgentPid, err := childPidFromPPid(1)
 	if err != nil {
 		return nil, err
