@@ -41,7 +41,7 @@ var startDaemonCmd = &cobra.Command{
 			return fmt.Errorf("daemon must be run as root")
 		}
 
-		_, err := utils.InitOtel(cmd.Context(), cmd.Parent().Version)
+		_, err := utils.InitOtel(cmd.Context(), rootCmd.Version)
 		if err != nil {
 			logger.Warn().Err(err).Msg("Failed to initialize otel")
 			return err
@@ -59,6 +59,11 @@ var startDaemonCmd = &cobra.Command{
 			err = fmt.Errorf("invalid cuda version %s, must be one of %v", cudaVersion, cudaVersions)
 			logger.Error().Err(err).Msg("invalid cuda version")
 			return err
+		}
+
+		cedanaURL := viper.GetString("connection.cedana_url")
+		if cedanaURL == "" {
+			cedanaURL = "unset"
 		}
 
 		logger.Info().Msgf("starting daemon version %s", rootCmd.Version)
