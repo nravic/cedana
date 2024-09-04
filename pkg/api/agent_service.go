@@ -14,6 +14,7 @@ import (
 	"github.com/cedana/cedana/pkg/api/services/agent_task"
 	"github.com/cedana/cedana/pkg/api/services/rpc"
 	"github.com/cedana/cedana/pkg/api/services/task"
+	"github.com/cedana/cedana/pkg/utils"
 	"github.com/mdlayher/vsock"
 	"github.com/rs/zerolog"
 	"github.com/shirou/gopsutil/v3/cpu"
@@ -44,10 +45,19 @@ type AgentServer struct {
 }
 
 func NewAgentServer(ctx context.Context, opts *ServeOpts) (*AgentServer, error) {
-	logger := ctx.Value("logger").(*zerolog.Logger)
 	var err error
 
-	server := &AgentServer{}
+	machineID, err := utils.GetMachineID()
+	if err != nil {
+		return nil, err
+	}
+
+	server := &AgentServer{
+		grpcServer: grpc.NewServer(
+			grpc.StreamInterceptor(loggingStreamInterceptor()),
+			grpc.UnaryInterceptor(loggingUnaryInterceptor(*opts, machineID)),
+		),
+	}
 
 	healthcheck := health.NewServer()
 	healthcheckgrpc.RegisterHealthServer(server.grpcServer, healthcheck)
@@ -56,7 +66,6 @@ func NewAgentServer(ctx context.Context, opts *ServeOpts) (*AgentServer, error) 
 		// criu instantiated as empty, because all criu functions run criu swrk (starting the criu rpc server)
 		// instead of leaving one running forever.
 		CRIU:      &Criu{},
-		logger:    logger,
 		serverCtx: ctx,
 	}
 

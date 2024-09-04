@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"os"
+	"time"
 
 	"github.com/cedana/cedana/pkg/api"
 	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 var cudaVersions = map[string]string{
@@ -17,10 +19,11 @@ var cudaVersions = map[string]string{
 
 func main() {
 	ctx := context.Background()
-	logger := &zerolog.Logger{}
+
+	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339})
 
 	if os.Getuid() != 0 {
-		logger.Error().Msg("daemon must be run as root")
+		log.Error().Msg("daemon must be run as root")
 	}
 
 	// _, err := utils.InitOtel(cmd.Context(), cmd.Parent().Version)
@@ -38,11 +41,13 @@ func main() {
 
 	server, err := api.NewAgentServer(ctx, srvOpts)
 	if err != nil {
-		logger.Err(err)
+		log.Err(err)
 	}
+
+	log.Logger.Debug().Interface("Server:", server)
 
 	err = api.StartServer(ctx, srvOpts, server)
 	if err != nil {
-		logger.Err(err)
+		log.Err(err)
 	}
 }

@@ -44,8 +44,8 @@ func (s *agentService) KataDump(ctx context.Context, args *agent_task.DumpArgs) 
 
 	state.JID = args.JID
 
-	dumpStats := task.DumpStats{
-		DumpType: task.DumpType_KATA,
+	dumpStats := agent_task.DumpStats{
+		DumpType: agent_task.DumpType_KATA,
 	}
 	ctx = context.WithValue(ctx, "dumpStats", &dumpStats)
 
@@ -55,11 +55,11 @@ func (s *agentService) KataDump(ctx context.Context, args *agent_task.DumpArgs) 
 		return nil, st.Err()
 	}
 
-	var resp task.DumpResp
+	var resp agent_task.DumpResp
 
 	switch args.Type {
-	case task.CRType_LOCAL:
-		resp = task.DumpResp{
+	case agent_task.CRType_LOCAL:
+		resp = agent_task.DumpResp{
 			Message:      fmt.Sprintf("Dumped process %d to %s", pid, args.Dir),
 			CheckpointID: state.CheckpointPath, // XXX: Just return path for ID for now
 		}

@@ -369,7 +369,10 @@ func (s *agentService) kataDump(ctx context.Context, state *agent_task.ProcessSt
 		return err
 	}
 
-	s.postDump(ctx, dumpdir, state, false)
+	// ***TODO BS***
+	// Need To make this transmit data back to full daemon
+	// *************
+	// s.postDump(ctx, dumpdir, state, false)
 
 	conn, err := vsock.Dial(vsock.Host, 9999, nil)
 	if err != nil {
