@@ -6,12 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/cedana/cedana/pkg/api"
 	"github.com/cedana/cedana/pkg/api/services"
 	"github.com/cedana/cedana/pkg/api/services/task"
 	"github.com/cedana/cedana/pkg/utils"
-	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -35,19 +36,17 @@ var startDaemonCmd = &cobra.Command{
 	Short: "Starts the rpc server. To run as a daemon, use the provided script (systemd) or use systemd/sysv/upstart.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
-		logger := ctx.Value("logger").(*zerolog.Logger)
-
 		if os.Getuid() != 0 {
 			return fmt.Errorf("daemon must be run as root")
 		}
 
 		_, err := utils.InitOtel(cmd.Context(), rootCmd.Version)
 		if err != nil {
-			logger.Warn().Err(err).Msg("Failed to initialize otel")
+			log.Warn().Err(err).Msg("Failed to initialize otel")
 			return err
 		}
 
-		logger.Info().Msg("otel initialized")
+		log.Debug().Msg("otel initialized")
 
 		if viper.GetBool("profiling_enabled") {
 			go startProfiler()
@@ -57,7 +56,7 @@ var startDaemonCmd = &cobra.Command{
 		cudaVersion, _ := cmd.Flags().GetString(cudaVersionFlag)
 		if _, ok := cudaVersions[cudaVersion]; !ok {
 			err = fmt.Errorf("invalid cuda version %s, must be one of %v", cudaVersion, cudaVersions)
-			logger.Error().Err(err).Msg("invalid cuda version")
+			log.Error().Err(err).Msg("invalid cuda version")
 			return err
 		}
 
@@ -66,9 +65,40 @@ var startDaemonCmd = &cobra.Command{
 			cedanaURL = "unset"
 		}
 
-		logger.Info().Msgf("starting daemon version %s", rootCmd.Version)
+		log.Info().Str("version", rootCmd.Version).Msg("starting daemon")
 
-		srvOpts := &api.ServeOpts{GPUEnabled: gpuEnabled, CUDAVersion: cudaVersions[cudaVersion]}
+		// poll for otel signoz logging
+		otel_enabled := viper.GetBool("otel_enabled")
+		if otel_enabled {
+			go func() {
+				time.Sleep(10 * time.Second)
+				cts, err := services.NewClient()
+				if err != nil {
+					log.Error().Msgf("error creating client: %v", err)
+					return
+				}
+				defer cts.Close()
+
+				log.Info().Msg("started polling...")
+				for {
+					conts, err := cts.GetContainerInfo(ctx, &task.ContainerInfoRequest{})
+					if err != nil {
+						log.Error().Msgf("error getting info: %v", err)
+						return
+					}
+					_ = conts
+					time.Sleep(1 * time.Second)
+				}
+			}()
+		}
+
+		srvOpts := &api.ServeOpts{
+			GPUEnabled: gpuEnabled, 
+			CUDAVersion: cudaVersions[cudaVersion]
+			CedanaURL:    cedanaURL,
+			// TODO(swarnimarun): allow flag to customize the port
+			GrpcPort: 8080,
+		}
 
 		server, err := api.NewServer(ctx, srvOpts)
 		if err != nil {
@@ -77,7 +107,7 @@ var startDaemonCmd = &cobra.Command{
 
 		err = api.StartServer(ctx, srvOpts, server)
 		if err != nil {
-			logger.Error().Err(err).Msgf("stopping daemon")
+			log.Error().Err(err).Msgf("stopping daemon")
 			return err
 		}
 
@@ -89,12 +119,9 @@ var checkDaemonCmd = &cobra.Command{
 	Use:   "check",
 	Short: "Check if daemon is running and healthy",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		ctx := cmd.Context()
-		logger := ctx.Value("logger").(*zerolog.Logger)
-
 		cts, err := services.NewClient()
 		if err != nil {
-			logger.Error().Err(err).Msg("error creating client")
+			log.Error().Err(err).Msg("error creating client")
 			return err
 		}
 

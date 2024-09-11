@@ -3,9 +3,12 @@ package api
 // Internal functions used by service for dumping processes and containers
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -20,6 +23,7 @@ import (
 	"github.com/cedana/cedana/pkg/types"
 	"github.com/cedana/cedana/pkg/utils"
 	"github.com/docker/docker/pkg/namesgenerator"
+	"github.com/rs/zerolog/log"
 	"github.com/spf13/viper"
 	bolt "go.etcd.io/bbolt"
 	"google.golang.org/grpc"
@@ -55,7 +59,7 @@ type Bundle struct {
 // prepareDump sets up the folders to dump into, and sets the criu options.
 // preDump on the other hand does any process cleanup right before the checkpoint.
 func (s *service) prepareDump(ctx context.Context, state *task.ProcessState, args *task.DumpArgs, opts *rpc.CriuOpts) (string, error) {
-	stats, ok := ctx.Value("dumpStats").(*task.DumpStats)
+	stats, ok := ctx.Value(utils.DumpStatsKey).(*task.DumpStats)
 	if !ok {
 		return "", fmt.Errorf("could not get dump stats from context")
 	}
@@ -75,9 +79,10 @@ func (s *service) prepareDump(ctx context.Context, state *task.ProcessState, arg
 		}
 	}
 
-	opts.TcpEstablished = proto.Bool(hasTCP || args.TcpEstablished)
+	opts.TcpEstablished = proto.Bool(hasTCP || args.GetCriuOpts().GetTcpEstablished())
 	opts.ExtUnixSk = proto.Bool(hasExtUnixSocket)
 	opts.FileLocks = proto.Bool(true)
+	opts.LeaveRunning = proto.Bool(args.GetCriuOpts().GetLeaveRunning() || viper.GetBool("client.leave-running"))
 
 	// check tty state
 	// if pts is in open fds, chances are it's a shell job
@@ -131,23 +136,22 @@ func (s *service) prepareDump(ctx context.Context, state *task.ProcessState, arg
 	if err != nil {
 		return "", err
 	}
-
 	elapsed := time.Since(start)
 	stats.PrepareDuration = elapsed.Milliseconds()
 
 	return dumpDirPath, nil
 }
 
-func (s *service) postDump(ctx context.Context, dumpdir string, state *task.ProcessState, stream bool) {
+func (s *service) postDump(ctx context.Context, dumpdir string, state *task.ProcessState, streamCmd *exec.Cmd) {
 	start := time.Now()
-	stats, ok := ctx.Value("dumpStats").(*task.DumpStats)
+	stats, ok := ctx.Value(utils.DumpStatsKey).(*task.DumpStats)
 	if !ok {
-		s.logger.Fatal().Msg("could not get dump stats from context")
+		log.Fatal().Msg("could not get dump stats from context")
 	}
 
 	var compressedCheckpointPath string
-	if stream {
-		compressedCheckpointPath = dumpdir
+	if streamCmd != nil {
+		compressedCheckpointPath = filepath.Join(dumpdir, "img.lz4")
 	} else {
 		compressedCheckpointPath = strings.Join([]string{dumpdir, ".tar"}, "")
 	}
@@ -156,24 +160,26 @@ func (s *service) postDump(ctx context.Context, dumpdir string, state *task.Proc
 	state.CheckpointState = task.CheckpointState_CHECKPOINTED
 
 	// sneak in a serialized state obj
-	err := serializeStateToDir(dumpdir, state, stream)
+	err := serializeStateToDir(dumpdir, state, streamCmd != nil)
 	if err != nil {
-		s.logger.Fatal().Err(err)
+		log.Fatal().Err(err)
 	}
 
-	s.logger.Info().Str("Path", compressedCheckpointPath).Msg("compressing checkpoint")
+	log.Info().Str("Path", compressedCheckpointPath).Msg("compressing checkpoint")
 
-	if !stream {
+	if streamCmd != nil {
+		streamCmd.Wait()
+	} else {
 		err = utils.TarFolder(dumpdir, compressedCheckpointPath)
 		if err != nil {
-			s.logger.Fatal().Err(err)
+			log.Fatal().Err(err)
 		}
 	}
 
 	// get size of compressed checkpoint
 	info, err := os.Stat(compressedCheckpointPath)
 	if err != nil {
-		s.logger.Fatal().Err(err)
+		log.Fatal().Err(err)
 	}
 
 	elapsed := time.Since(start)
@@ -185,47 +191,21 @@ func (s *service) postDump(ctx context.Context, dumpdir string, state *task.Proc
 
 func (s *service) prepareDumpOpts() *rpc.CriuOpts {
 	opts := rpc.CriuOpts{
-		LogLevel:     proto.Int32(CRIU_DUMP_LOG_LEVEL),
-		LogFile:      proto.String(CRIU_DUMP_LOG_FILE),
-		LeaveRunning: proto.Bool(viper.GetBool("client.leave_running")),
-		GhostLimit:   proto.Uint32(GHOST_LIMIT),
+		LogLevel:   proto.Int32(CRIU_DUMP_LOG_LEVEL),
+		LogFile:    proto.String(CRIU_DUMP_LOG_FILE),
+		GhostLimit: proto.Uint32(GHOST_LIMIT),
 	}
 	return &opts
 }
 
 func (s *service) runcDump(ctx context.Context, root, containerID string, pid int32, opts *container.CriuOpts, state *task.ProcessState) error {
 	start := time.Now()
-	stats, ok := ctx.Value("dumpStats").(*task.DumpStats)
+	stats, ok := ctx.Value(utils.DumpStatsKey).(*task.DumpStats)
 	if !ok {
 		return fmt.Errorf("could not get dump stats from context")
 	}
 
 	var crPid int
-
-	links := []linkPairs{
-		{"/host/var/run/netns", "/var/run/netns"},
-		{"/host/run/containerd", "/run/containerd"},
-		{"/host/var/run/secrets", "/var/run/secrets"},
-		{"/host/var/lib/rancher", "/var/lib/rancher"},
-		{"/host/run/k3s", "/run/k3s"},
-		{"/host/var/lib/kubelet", "/var/lib/kubelet"},
-	}
-	// Create sym links so that runc c/r can resolve config.json paths to the mounted ones in /host
-	for _, link := range links {
-		// Check if the target file exists
-		if _, err := os.Stat(link.Value); os.IsNotExist(err) {
-			// Target file does not exist, attempt to create a symbolic link
-			if err := os.Symlink(link.Key, link.Value); err != nil {
-				// Handle the error if creating symlink fails
-				fmt.Println("Error creating symlink:", err)
-				// Handle the error or log it as needed
-			}
-		} else if err != nil {
-			// Handle other errors from os.Stat if any
-			fmt.Println("Error checking file info:", err)
-			// Handle the error or log it as needed
-		}
-	}
 
 	bundle := Bundle{ContainerID: containerID}
 	runcContainer := container.GetContainerFromRunc(containerID, root)
@@ -241,7 +221,7 @@ func (s *service) runcDump(ctx context.Context, root, containerID string, pid in
 
 	err := runcContainer.RuncCheckpoint(opts, crPid, root, runcContainer.Config)
 	if err != nil {
-		s.logger.Fatal().Err(err)
+		log.Fatal().Err(err)
 		return err
 	}
 
@@ -256,7 +236,7 @@ func (s *service) runcDump(ctx context.Context, root, containerID string, pid in
 
 	// CRIU ntfy hooks get run before this,
 	// so have to ensure that image files aren't tampered with
-	s.postDump(ctx, opts.ImagesDirectory, state, false)
+	s.postDump(ctx, opts.ImagesDirectory, state, nil)
 
 	return nil
 }
@@ -264,9 +244,27 @@ func (s *service) runcDump(ctx context.Context, root, containerID string, pid in
 func (s *service) containerdDump(ctx context.Context, imagePath, containerID string, state *task.ProcessState) error {
 	// CRIU ntfy hooks get run before this,
 	// so have to ensure that image files aren't tampered with
-	s.postDump(ctx, imagePath, state, false)
+	s.postDump(ctx, imagePath, state, nil)
 
 	return nil
+}
+
+func (s *service) setupStreamerCapture(dumpdir string) *exec.Cmd {
+	buf := new(bytes.Buffer)
+	cmd := exec.Command("cedana-image-streamer", "--dir", dumpdir, "capture")
+	cmd.Stderr = buf
+	err := cmd.Start()
+	if err != nil {
+		s.logger.Fatal().Msgf("unable to exec image streamer server: %v", err)
+	}
+	s.logger.Info().Int("PID", cmd.Process.Pid).Msg("started cedana-image-streamer")
+
+	for buf.Len() == 0 {
+		s.logger.Info().Msgf("waiting for cedana-image-streamer to setup...")
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	return cmd
 }
 
 func (s *service) dump(ctx context.Context, state *task.ProcessState, args *task.DumpArgs) error {
@@ -274,6 +272,10 @@ func (s *service) dump(ctx context.Context, state *task.ProcessState, args *task
 	dumpdir, err := s.prepareDump(ctx, state, args, opts)
 	if err != nil {
 		return err
+	}
+	var cmd *exec.Cmd
+	if args.Stream {
+		cmd = s.setupStreamerCapture(dumpdir)
 	}
 
 	var GPUCheckpointed bool
@@ -287,7 +289,7 @@ func (s *service) dump(ctx context.Context, state *task.ProcessState, args *task
 
 	img, err := os.Open(dumpdir)
 	if err != nil {
-		s.logger.Warn().Err(err).Msgf("could not open checkpoint storage dir %s", dumpdir)
+		log.Warn().Err(err).Msgf("could not open checkpoint storage dir %s", dumpdir)
 		return err
 	}
 	defer img.Close()
@@ -299,10 +301,10 @@ func (s *service) dump(ctx context.Context, state *task.ProcessState, args *task
 		Logger: s.logger,
 	}
 
-	s.logger.Info().Int32("PID", state.PID).Msg("beginning dump")
+	log.Info().Int32("PID", state.PID).Msg("beginning dump")
 
 	start := time.Now()
-	stats, ok := ctx.Value("dumpStats").(*task.DumpStats)
+	stats, ok := ctx.Value(utils.DumpStatsKey).(*task.DumpStats)
 	if !ok {
 		return fmt.Errorf("could not get dump stats from context")
 	}
@@ -311,11 +313,11 @@ func (s *service) dump(ctx context.Context, state *task.ProcessState, args *task
 	if err != nil {
 		// check for sudo error
 		if strings.Contains(err.Error(), "errno 0") {
-			s.logger.Warn().Msgf("error dumping, cedana is not running as root: %v", err)
+			log.Warn().Msgf("error dumping, cedana is not running as root: %v", err)
 			return err
 		}
 
-		s.logger.Warn().Msgf("error dumping process: %v", err)
+		log.Warn().Msgf("error dumping process: %v", err)
 		return err
 	}
 
@@ -327,7 +329,7 @@ func (s *service) dump(ctx context.Context, state *task.ProcessState, args *task
 		state.JobState = task.JobState_JOB_KILLED
 	}
 
-	s.postDump(ctx, dumpdir, state, args.Stream)
+	s.postDump(ctx, dumpdir, state, cmd)
 
 	return nil
 }
@@ -341,7 +343,7 @@ func (s *agentService) kataDump(ctx context.Context, state *agent_task.ProcessSt
 
 	img, err := os.Open(dumpdir)
 	if err != nil {
-		s.logger.Warn().Err(err).Msgf("could not open checkpoint storage dir %s", args.Dir)
+		log.Warn().Err(err).Msgf("could not open checkpoint storage dir %s", args.Dir)
 		return err
 	}
 	defer img.Close()
@@ -355,17 +357,17 @@ func (s *agentService) kataDump(ctx context.Context, state *agent_task.ProcessSt
 		Logger: s.logger,
 	}
 
-	s.logger.Info().Msgf(`beginning dump of pid %d`, state.PID)
+	log.Info().Msgf(`beginning dump of pid %d`, state.PID)
 
 	_, err = s.CRIU.Dump(opts, &nfy)
 	if err != nil {
 		// check for sudo error
 		if strings.Contains(err.Error(), "errno 0") {
-			s.logger.Warn().Msgf("error dumping, cedana is not running as root: %v", err)
+			log.Warn().Msgf("error dumping, cedana is not running as root: %v", err)
 			return err
 		}
 
-		s.logger.Warn().Msgf("error dumping process: %v", err)
+		log.Warn().Msgf("error dumping process: %v", err)
 		return err
 	}
 
@@ -410,7 +412,7 @@ func (s *agentService) kataDump(ctx context.Context, state *agent_task.ProcessSt
 
 func (s *service) gpuDump(ctx context.Context, dumpdir string) error {
 	start := time.Now()
-	stats, ok := ctx.Value("dumpStats").(*task.DumpStats)
+	stats, ok := ctx.Value(utils.DumpStatsKey).(*task.DumpStats)
 	if !ok {
 		return fmt.Errorf("could not get dump stats from context")
 	}
@@ -421,7 +423,7 @@ func (s *service) gpuDump(ctx context.Context, dumpdir string) error {
 
 	gpuConn, err := grpc.Dial("127.0.0.1:50051", opts...)
 	if err != nil {
-		s.logger.Warn().Msgf("could not connect to gpu controller service: %v", err)
+		log.Warn().Msgf("could not connect to gpu controller service: %v", err)
 		return err
 	}
 	defer gpuConn.Close()
@@ -436,7 +438,7 @@ func (s *service) gpuDump(ctx context.Context, dumpdir string) error {
 	if err != nil {
 		st, ok := status.FromError(err)
 		if ok {
-			s.logger.Error().Str("message", st.Message()).Str("code", st.Code().String()).Msgf("gpu checkpoint failed")
+			log.Error().Str("message", st.Message()).Str("code", st.Code().String()).Msgf("gpu checkpoint failed")
 			return fmt.Errorf("gpu checkpoint failed")
 		} else {
 			return err

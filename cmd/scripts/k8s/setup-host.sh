@@ -1,12 +1,33 @@
-
 #!/bin/bash
+
+chroot /host /bin/bash <<'EOT'
+APP_NAME="cedana"
+SERVICE_FILE="/etc/systemd/system/$APP_NAME.service"
+
+echo "Stopping $APP_NAME service..."
+$SUDO_USE systemctl stop $APP_NAME.service
+
+# truncate the logs
+echo -n > /var/log/cedana-daemon.log
+EOT
 
 # Copy Cedana binaries to the host
 cp /usr/local/bin/cedana /host/usr/local/bin/cedana
 cp /usr/local/bin/build-start-daemon.sh /host/build-start-daemon.sh
 
 # Enter chroot environment on the host
-chroot /host /bin/bash <<'EOT'
+# TODO NR - CEDANA_URL is a hack, cleanup code to fix
+env \
+    CEDANA_API_SERVER="$CEDANA_API_SERVER" \
+    CEDANA_URL="$CEDANA_API_SERVER" \
+    CEDANA_API_KEY="$CEDANA_API_KEY" \
+    chroot /host /bin/bash <<'EOT'
+
+if [[ $SKIPSETUP -eq 1 ]]; then
+    cd /
+    IS_K8S=1 ./build-start-daemon.sh --systemctl --no-build --otel
+    exit 0
+fi
 
 # Define packages for YUM and APT
 YUM_PACKAGES=(
@@ -69,16 +90,8 @@ else
     exit 1
 fi
 
-# Install Go
-wget https://go.dev/dl/go1.22.0.linux-amd64.tar.gz
-rm -rf /usr/local/go
-tar -C /usr/local -xzf go1.22.0.linux-amd64.tar.gz
-rm go1.22.0.linux-amd64.tar.gz
-
-export PATH=$PATH:/usr/local/go/bin
-
 # Run the Cedana daemon setup script
 cd /
-./build-start-daemon.sh --systemctl --no-build
+./build-start-daemon.sh --systemctl --no-build --otel
 
 EOT
