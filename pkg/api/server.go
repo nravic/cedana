@@ -27,7 +27,6 @@ import (
 	"github.com/cedana/cedana/pkg/jobservice"
 	"github.com/cedana/cedana/pkg/utils"
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/afero"
 	"github.com/spf13/viper"
@@ -43,28 +42,23 @@ import (
 )
 
 const (
-	ADDRESS                     = "0.0.0.0:8080"
+	DEFAULT_HOST                = "0.0.0.0"
 	PROTOCOL                    = "tcp"
 	CEDANA_CONTAINER_NAME       = "binary-container"
 	SERVER_LOG_MODE             = os.O_APPEND | os.O_CREATE | os.O_WRONLY
 	SERVER_LOG_PERMS            = 0o644
 	GPU_CONTROLLER_LOG_PATH     = "/tmp/cedana-gpucontroller.log"
-	VSOCK_PORT                  = 9999
 	GPU_CONTROLLER_WAIT_TIMEOUT = 5 * time.Second
 )
-
-var Address = "0.0.0.0:8080"
 
 type service struct {
 	CRIU            *Criu
 	fs              *afero.Afero // for dependency-injection of filesystems (useful for testing)
 	db              db.DB
-	logger          *zerolog.Logger
 	store           *utils.CedanaStore
 	serverCtx       context.Context // context alive for the duration of the server
 	wg              sync.WaitGroup  // for waiting for all background tasks to finish
 	gpuEnabled      bool
-	cudaVersion     string
 	machineID       string
 	cadvisorManager manager.Manager
 
@@ -80,24 +74,20 @@ type DaemonServer struct {
 }
 
 type Server interface {
-	start() error
-	stop() error
+	start(context.Context) error
+	stop(context.Context) error
 }
 
 type ServeOpts struct {
-	GPUEnabled   bool
-	CUDAVersion  string
-	VSOCKEnabled bool
-	CedanaURL    string
-	GrpcPort     uint64
-}
-
-type pullGPUBinaryRequest struct {
-	CudaVersion string `json:"cuda_version"`
+	GPUEnabled        bool
+	VSOCKEnabled      bool
+	CedanaURL         string
+	Port              uint32
+	MetricsEnabled    bool
+	JobServiceEnabled bool
 }
 
 func NewServer(ctx context.Context, opts *ServeOpts) (*DaemonServer, error) {
-	logger := ctx.Value("logger").(*zerolog.Logger)
 	var err error
 
 	machineID, err := utils.GetMachineID()
@@ -115,15 +105,21 @@ func NewServer(ctx context.Context, opts *ServeOpts) (*DaemonServer, error) {
 	healthcheck := health.NewServer()
 	healthcheckgrpc.RegisterHealthServer(server.grpcServer, healthcheck)
 
-	manager, err := SetupCadvisor(ctx)
-	if err != nil {
-		log.Error().Err(err).Send()
-		return nil, err
+	var manager manager.Manager
+	if opts.MetricsEnabled {
+		manager, err = SetupCadvisor(ctx)
+		if err != nil {
+			log.Error().Err(err).Send()
+			return nil, err
+		}
 	}
 
-	js, err := jobservice.New()
-	if err != nil {
-		return nil, err
+	var js *jobservice.JobService
+	if opts.JobServiceEnabled {
+		js, err = jobservice.New()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	service := &service{
@@ -135,9 +131,7 @@ func NewServer(ctx context.Context, opts *ServeOpts) (*DaemonServer, error) {
 		store:           utils.NewCedanaStore(),
 		serverCtx:       ctx,
 		gpuEnabled:      opts.GPUEnabled,
-		cudaVersion:     opts.CUDAVersion,
 		machineID:       machineID,
-		logger:          logger,
 		cadvisorManager: manager,
 		jobService:      js,
 	}
@@ -150,7 +144,7 @@ func NewServer(ctx context.Context, opts *ServeOpts) (*DaemonServer, error) {
 	// NOTE: `localhost` server inside kubernetes may or may not work
 	// based on firewall and network configuration, it would only work
 	// on local system, hence for serving use 0.0.0.0
-	Address = fmt.Sprintf("0.0.0.0:%d", opts.GrpcPort)
+	Address := fmt.Sprintf("%s:%d", DEFAULT_HOST, opts.Port)
 	listener, err = net.Listen(PROTOCOL, Address)
 	if err != nil {
 		return nil, err
@@ -163,7 +157,7 @@ func NewServer(ctx context.Context, opts *ServeOpts) (*DaemonServer, error) {
 	return server, err
 }
 
-func (s *DaemonServer) start(ctx context.Context) error {
+func (s DaemonServer) start(ctx context.Context) error {
 	go func() {
 		if err := s.service.jobService.Start(ctx); err != nil {
 			// note: at the time of writing this comment, below is unreachable
@@ -174,14 +168,13 @@ func (s *DaemonServer) start(ctx context.Context) error {
 	return s.grpcServer.Serve(s.listener)
 }
 
-func (s *DaemonServer) stop() error {
+func (s DaemonServer) stop(ctx context.Context) error {
 	s.grpcServer.GracefulStop()
 	return s.listener.Close()
 }
 
 // Takes in a context that allows for cancellation from the cmdline
 func StartServer(cmdCtx context.Context, opts *ServeOpts, srv Server) error {
-
 	// Create a child context for the server
 	srvCtx, cancel := context.WithCancelCause(cmdCtx)
 	defer cancel(nil)
@@ -216,7 +209,7 @@ func StartServer(cmdCtx context.Context, opts *ServeOpts, srv Server) error {
 
 		if opts.GPUEnabled {
 			if viper.GetString("gpu_controller_path") == "" {
-				err := pullGPUBinary(cmdCtx, utils.GpuControllerBinaryName, utils.GpuControllerBinaryPath, opts.CUDAVersion)
+				err := pullGPUBinary(cmdCtx, utils.GpuControllerBinaryName, utils.GpuControllerBinaryPath)
 				if err != nil {
 					log.Error().Err(err).Msg("could not pull gpu controller")
 					cancel(err)
@@ -227,7 +220,7 @@ func StartServer(cmdCtx context.Context, opts *ServeOpts, srv Server) error {
 			}
 
 			if viper.GetString("gpu_shared_lib_path") == "" {
-				err := pullGPUBinary(cmdCtx, utils.GpuSharedLibName, utils.GpuSharedLibPath, opts.CUDAVersion)
+				err := pullGPUBinary(cmdCtx, utils.GpuSharedLibName, utils.GpuSharedLibPath)
 				if err != nil {
 					log.Error().Err(err).Msg("could not pull gpu shared lib")
 					cancel(err)
@@ -238,9 +231,9 @@ func StartServer(cmdCtx context.Context, opts *ServeOpts, srv Server) error {
 			}
 		}
 
-		log.Info().Str("address", ADDRESS).Msgf("server listening")
+		log.Info().Str("host", DEFAULT_HOST).Uint32("port", opts.Port).Msg("server listening")
 
-		err := srv.start()
+		err := srv.start(cmdCtx)
 		if err != nil {
 			cancel(err)
 		}
@@ -250,7 +243,7 @@ func StartServer(cmdCtx context.Context, opts *ServeOpts, srv Server) error {
 	err := srvCtx.Err()
 
 	// Wait for all background go routines to finish
-	srv.stop()
+	srv.stop(cmdCtx)
 
 	log.Debug().Msg("stopped RPC server gracefully")
 
@@ -326,6 +319,9 @@ func (s *service) StartGPUController(ctx context.Context, uid, gid int32, groups
 	timeout := time.Now().Add(GPU_CONTROLLER_WAIT_TIMEOUT)
 	for {
 		resp, err := gpuServiceConn.StartupPoll(ctx, &args)
+		if err != nil {
+			log.Debug().Err(err).Msg("gpu controller not started yet")
+		}
 		if time.Now().After(timeout) {
 			return nil, fmt.Errorf("gpu controller did not start in time")
 		}
@@ -370,11 +366,15 @@ func loggingUnaryInterceptor(serveOpts ServeOpts, machineID string) grpc.UnarySe
 			attribute.String("grpc.request", payloadToJSON(req)),
 			attribute.String("server.id", machineID),
 			attribute.String("server.opts.cedanaurl", serveOpts.CedanaURL),
-			attribute.String("server.opts.cudaversion", serveOpts.CUDAVersion),
 			attribute.Bool("server.opts.gpuenabled", serveOpts.GPUEnabled),
 		)
 
-		log.Debug().Str("method", info.FullMethod).Interface("request", req).Msg("gRPC request received")
+		// log the GetContainerInfo method to trace
+		if strings.Contains(info.FullMethod, "TaskService/GetContainerInfo") {
+			log.Trace().Str("method", info.FullMethod).Interface("request", req).Msg("gRPC request received")
+		} else {
+			log.Debug().Str("method", info.FullMethod).Interface("request", req).Msg("gRPC request received")
+		}
 
 		resp, err := handler(ctx, req)
 
@@ -448,9 +448,12 @@ func (s *service) GPUHealthCheck(
 		return nil
 	}
 
-	cmd, err := s.StartGPUController(ctx, req.UID, req.GID, req.Groups, nil)
+	gpuOutBuf := &bytes.Buffer{}
+	gpuOut := io.MultiWriter(gpuOutBuf)
+	cmd, err := s.StartGPUController(ctx, req.UID, req.GID, req.Groups, gpuOut)
 	if err != nil {
-		resp.UnhealthyReasons = append(resp.UnhealthyReasons, fmt.Sprintf("could not start gpu controller %v", err))
+		log.Error().Err(err).Str("stdout/stderr", gpuOutBuf.String()).Msg("could not start gpu controller")
+		resp.UnhealthyReasons = append(resp.UnhealthyReasons, fmt.Sprintf("could not start gpu controller: %v", err))
 		return nil
 	}
 
@@ -504,31 +507,21 @@ func (s *service) GetConfig(ctx context.Context, req *task.GetConfigRequest) (*t
 	return resp, nil
 }
 
-func pullGPUBinary(ctx context.Context, binary string, filePath string, version string) error {
+func pullGPUBinary(ctx context.Context, binary string, filePath string) error {
 	_, err := os.Stat(filePath)
 	if err == nil {
-		log.Debug().Str("Path", filePath).Msgf("GPU binary exists. Delete existing binary to download another supported cuda version.")
+		log.Debug().Str("Path", filePath).Msgf("GPU binary exists. Delete existing binary to download latest version.")
 		// TODO NR - check version and checksum of binary?
 		return nil
 	}
-	log.Debug().Msgf("pulling gpu binary %s for cuda version %s", binary, version)
+	log.Debug().Msgf("pulling gpu binary %s", binary)
 
 	url := viper.GetString("connection.cedana_url") + "/checkpoint/gpu/" + binary
 	log.Debug().Msgf("pulling %s from %s", binary, url)
 
 	httpClient := &http.Client{}
 
-	body := pullGPUBinaryRequest{
-		CudaVersion: version,
-	}
-
-	jsonBody, err := json.Marshal(body)
-	if err != nil {
-		log.Err(err).Msg("could not marshal request body")
-		return err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		log.Err(err).Msg("failed to build http post request with jsonBody")
 		return err

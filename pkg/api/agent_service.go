@@ -29,6 +29,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+const VSOCK_PORT = 8080
+
 type agentService struct {
 	CRIU      *Criu
 	logger    *zerolog.Logger
