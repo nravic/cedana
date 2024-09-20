@@ -76,7 +76,7 @@ func NewAgentServer(ctx context.Context, opts *ServeOpts) (*AgentServer, error) 
 
 	var listener net.Listener
 
-	listener, err = vsock.Listen(VSOCK_PORT, nil)
+	listener, err = vsock.Listen(opts.Port, nil)
 
 	if err != nil {
 		return nil, err
@@ -88,11 +88,11 @@ func NewAgentServer(ctx context.Context, opts *ServeOpts) (*AgentServer, error) 
 	return server, err
 }
 
-func (s *AgentServer) start() error {
+func (s *AgentServer) start(context.Context) error {
 	return s.grpcServer.Serve(s.listener)
 }
 
-func (s *AgentServer) stop() error {
+func (s *AgentServer) stop(context.Context) error {
 	s.grpcServer.GracefulStop()
 	return s.listener.Close()
 }
