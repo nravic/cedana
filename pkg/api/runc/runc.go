@@ -103,7 +103,10 @@ func GetPidByContainerId(containerId, root string) (int32, error) {
 		if err := json.Unmarshal(configFile, &runcSpec); err != nil {
 			return 0, err
 		}
+	} else {
+		return 0, err
 	}
+
 	return int32(runcSpec.InitProcessPid), nil
 }
 

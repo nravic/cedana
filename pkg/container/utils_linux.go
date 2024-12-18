@@ -1233,7 +1233,7 @@ func getCgroupMounts(m *configs.Mount) ([]*configs.Mount, error) {
 
 func logCriuErrors(dir, file string) {
 	lookFor := []byte("Error") // Print the line that contains this...
-	const max = 5 + 1          // ... and a few preceding lines.
+	const max = 25 + 1         // ... and a few preceding lines.
 
 	logFile := filepath.Join(dir, file)
 	f, err := os.Open(logFile)
