@@ -252,6 +252,8 @@ func (s *service) RuncRestore(ctx context.Context, args *task.RuncRestoreArgs) (
 		return nil, err
 	}
 
+	state.ProcessInfo.PID = pid
+
 	// Only update state if it was a managed job
 	if jid != "" {
 		state, err = s.getState(ctx, opts.ContainerId)
