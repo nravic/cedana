@@ -285,6 +285,8 @@ func (s *service) RuncRestore(ctx context.Context, args *task.RuncRestoreArgs) (
 		}()
 	}
 
+	state.ProcessInfo = &task.ProcessInfo{PID: pid}
+
 	return &task.RuncRestoreResp{
 		Message:      fmt.Sprintf("Restored %v, successfully", opts.ContainerId),
 		State:        state,
