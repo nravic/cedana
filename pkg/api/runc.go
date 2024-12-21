@@ -285,6 +285,7 @@ func (s *service) RuncRestore(ctx context.Context, args *task.RuncRestoreArgs) (
 		}()
 	}
 
+	state = &task.ProcessState{}
 	state.ProcessInfo = &task.ProcessInfo{PID: pid}
 
 	return &task.RuncRestoreResp{
