@@ -14,12 +14,19 @@ import (
 	"syscall"
 
 	"github.com/cedana/cedana/pkg/api/runc"
+	"github.com/containers/buildah/pkg/parse"
+	"github.com/containers/buildah/util"
 	"github.com/containers/common/pkg/auth"
+	"github.com/containers/image/v5/pkg/shortnames"
+	is "github.com/containers/image/v5/storage"
+	"github.com/containers/image/v5/transports/alltransports"
 	"github.com/containers/image/v5/types"
+	"github.com/containers/storage"
 	archive "github.com/containers/storage/pkg/archive"
 	libconfig "github.com/cri-o/cri-o/pkg/config"
 	rspec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/rs/zerolog/log"
+	"github.com/sirupsen/logrus"
 )
 
 func getDefaultConfig() (*libconfig.Config, error) {
@@ -405,6 +412,113 @@ func removeBuildahContainer(containerID string) error {
 	return nil
 }
 
+func getStoreBuildah() (storage.Store, error) {
+	options, err := storage.DefaultStoreOptions()
+	if err != nil {
+		return nil, err
+	}
+
+	// Do not allow to mount a graphdriver that is not vfs if we are creating the userns as part
+	// of the mount command.
+	// Differently, allow the mount if we are already in a userns, as the mount point will still
+	// be accessible once "buildah mount" exits.
+	if os.Geteuid() != 0 && options.GraphDriverName != "vfs" {
+		return nil, fmt.Errorf("cannot mount using driver %s in rootless mode. You need to run it in a `buildah unshare` session", options.GraphDriverName)
+	}
+
+	store, err := storage.GetStore(options)
+	if store != nil {
+		is.Transport.SetStore(store)
+	}
+	return store, err
+}
+
+// Tail returns a string slice after the first element unless there are
+// not enough elements, then it returns an empty slice.  This is to replace
+// the urfavecli Tail method for args
+func Tail(a []string) []string {
+	if len(a) >= 2 {
+		return a[1:]
+	}
+	return []string{}
+}
+
+func commit(args []string) error {
+	var dest types.ImageReference
+	if len(args) == 0 {
+		return errors.New("container ID must be specified")
+	}
+
+	name := args[0]
+	args = Tail(args)
+	if len(args) > 1 {
+		return errors.New("too many arguments specified")
+	}
+	image := ""
+	if len(args) > 0 {
+		image = args[0]
+	}
+
+	store, err := getStoreBuildah()
+	if err != nil {
+		return err
+	}
+
+	ctx := context.Background() // was context.to-do earlier
+
+	builder, err := buildah.openBuilder(ctx, store, name)
+	if err != nil {
+		return fmt.Errorf("reading build container %q: %w", name, err)
+	}
+
+	systemContext, err := parse.SystemContextFromOptions(c)
+	if err != nil {
+		return fmt.Errorf("building system context: %w", err)
+	}
+
+	// If the user specified an image, we may need to massage it a bit if
+	// no transport is specified.
+	if image != "" {
+		if dest, err = alltransports.ParseImageName(image); err != nil {
+			candidates, err2 := shortnames.ResolveLocally(systemContext, image)
+			if err2 != nil {
+				return err2
+			}
+			if len(candidates) == 0 {
+				return fmt.Errorf("parsing target image name %q", image)
+			}
+			dest2, err2 := is.Transport.ParseStoreReference(store, candidates[0].String())
+			if err2 != nil {
+				return fmt.Errorf("parsing target image name %q: %w", image, err)
+			}
+			dest = dest2
+		}
+	}
+
+	id, ref, _, err := builder.Commit(ctx, dest)
+	if err != nil {
+		return util.GetFailureCause(err, fmt.Errorf("committing container %q to %q: %w", builder.Container, image, err))
+	}
+	if ref != nil && id != "" {
+		logrus.Debugf("wrote image %s with ID %s", ref, id)
+	} else if ref != nil {
+		logrus.Debugf("wrote image %s", ref)
+	} else if id != "" {
+		logrus.Debugf("wrote image with ID %s", id)
+	} else {
+		logrus.Debugf("wrote image")
+	}
+	// similar to running buildah rm
+	//	if iopts.rm {
+	//	return builder.Delete()
+	// }
+	return nil
+}
+
+func buildahCommit(args []string) {
+	commit(args)
+}
+
 // WARN:
 // currently we are using buildah CLI for commits to images, there are various bugs in older
 // versions of buildah, it is imperative we use the latest buildah binary (v1.37.3) which we
@@ -513,8 +627,7 @@ func RootfsMerge(ctx context.Context, originalImageRef, newImageRef, rootfsDiffP
 	}
 
 	log.Debug().Msgf("committing to %s", newImageRef)
-	cmd = exec.Command("buildah", "commit", containerID, newImageRef)
-	out, err = cmd.CombinedOutput()
+	buildahCommit(containerID, newImageRef)
 	if err != nil {
 		return fmt.Errorf("issue committing image: %s, %s", err.Error(), string(out))
 	}
