@@ -45,6 +45,7 @@ const (
 	pidFileFlag          = "pid-file"
 	modeFlag             = "mode"
 	skipInFlightFlag     = "skip-in-flight"
+	networkLockFlag      = "network-lock"
 	bucketFlag           = "bucket"
 	remotingEnabledFlag  = "remote"
 )
